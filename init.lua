@@ -224,6 +224,19 @@ vim.api.nvim_create_autocmd('TextYankPost', {
   end,
 })
 
+-- Reload buffers that another program changed on disk (Claude Code, git checkout, formatters).
+-- `autoread` only takes effect when Neovim checks the file; these events trigger that check.
+vim.o.autoread = true
+vim.api.nvim_create_autocmd({ 'FocusGained', 'BufEnter', 'CursorHold', 'TermClose', 'TermLeave' }, {
+  desc = 'Check for files changed outside of Neovim',
+  group = vim.api.nvim_create_augroup('kickstart-autoread', { clear = true }),
+  callback = function()
+    if vim.fn.mode() ~= 'c' and vim.fn.getcmdwintype() == '' then
+      vim.cmd 'checktime'
+    end
+  end,
+})
+
 -- [[ Install `lazy.nvim` plugin manager ]]
 --    See `:help lazy.nvim.txt` or https://github.com/folke/lazy.nvim for more info
 local lazypath = vim.fn.stdpath 'data' .. '/lazy/lazy.nvim'
@@ -352,6 +365,7 @@ require('lazy').setup({
         { '<leader>s', group = '[S]earch' },
         { '<leader>t', group = '[T]oggle' },
         { '<leader>h', group = 'Git [H]unk', mode = { 'n', 'v' } },
+        { '<leader>a', group = '[A]I / Claude Code', mode = { 'n', 'v' } },
       },
     },
   },
@@ -614,6 +628,7 @@ require('lazy').setup({
 
         -- Language servers installed on every machine (Mason package in parentheses).
         arduino_language_server = {}, -- arduino-language-server
+        bashls = {}, -- bash-language-server
         clangd = {},
         cmake = {}, -- cmake-language-server
         djlsp = {}, -- django-template-lsp
@@ -623,6 +638,7 @@ require('lazy').setup({
         matlab_ls = {}, -- matlab-language-server
         pyright = {},
         ruff = {},
+        taplo = {}, -- TOML
         texlab = {},
         yamlls = {}, -- yaml-language-server
 
@@ -663,6 +679,9 @@ require('lazy').setup({
         'cpptools', -- C/C++ debug adapter (vscode-cpptools)
         'gitleaks', -- Secret scanning
         'jupytext', -- Notebook <-> script conversion
+        'shellcheck', -- Shell linting (bash-language-server surfaces its diagnostics)
+        'shfmt', -- Shell formatter
+        'debugpy', -- Python debug adapter (see lua/kickstart/plugins/debug.lua)
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 
@@ -697,30 +716,105 @@ require('lazy').setup({
         desc = '[F]ormat buffer',
       },
     },
-    opts = {
-      notify_on_error = false,
-      format_on_save = function(bufnr)
-        -- Disable "format_on_save lsp_fallback" for languages that don't
-        -- have a well standardized coding style. You can add additional
-        -- languages here or re-enable it for the disabled ones.
-        local disable_filetypes = { c = true, cpp = true }
-        if disable_filetypes[vim.bo[bufnr].filetype] then
-          return nil
-        else
-          return {
-            timeout_ms = 500,
-            lsp_format = 'fallback',
-          }
+    opts = function()
+      -- Python formatting is opt-in per project: only when the project has a ruff.toml,
+      -- .ruff.toml, or a [tool.ruff] section in pyproject.toml. Opening an unconfigured
+      -- repo must never reformat whole files on save.
+      local function ruff_enabled(_, ctx)
+        local root = vim.fs.root(ctx.dirname, { 'ruff.toml', '.ruff.toml', 'pyproject.toml' })
+        if not root then
+          return false
         end
-      end,
-      formatters_by_ft = {
-        lua = { 'stylua' },
-        -- Conform can also run multiple formatters sequentially
-        -- python = { "isort", "black" },
-        --
-        -- You can use 'stop_after_first' to run the first available formatter from the list
-        -- javascript = { "prettierd", "prettier", stop_after_first = true },
+        for _, f in ipairs { 'ruff.toml', '.ruff.toml' } do
+          if vim.uv.fs_stat(root .. '/' .. f) then
+            return true
+          end
+        end
+        if vim.uv.fs_stat(root .. '/pyproject.toml') then
+          for _, line in ipairs(vim.fn.readfile(root .. '/pyproject.toml')) do
+            if line:match '^%[tool%.ruff' then
+              return true
+            end
+          end
+        end
+        return false
+      end
+
+      return {
+        notify_on_error = false,
+        format_on_save = function(bufnr)
+          -- Disable "format_on_save lsp_fallback" for languages that don't
+          -- have a well standardized coding style. You can add additional
+          -- languages here or re-enable it for the disabled ones.
+          local disable_filetypes = { c = true, cpp = true }
+          if disable_filetypes[vim.bo[bufnr].filetype] then
+            return nil
+          else
+            return {
+              timeout_ms = 500,
+              lsp_format = 'fallback',
+            }
+          end
+        end,
+        formatters_by_ft = {
+          lua = { 'stylua' },
+          -- Sort imports, then format. Deliberately NOT ruff_fix: that deletes unused imports
+          -- on save, which eats an import you added but have not used yet.
+          python = { 'ruff_organize_imports', 'ruff_format' },
+          sh = { 'shfmt' },
+          bash = { 'shfmt' },
+          -- You can use 'stop_after_first' to run the first available formatter from the list
+          -- javascript = { "prettierd", "prettier", stop_after_first = true },
+        },
+        formatters = {
+          ruff_organize_imports = { condition = ruff_enabled },
+          ruff_format = { condition = ruff_enabled },
+          shfmt = { prepend_args = { '-i', '2', '-ci' } },
+        },
+      }
+    end,
+  },
+
+  { -- Claude Code integration: same protocol as the official VS Code/JetBrains extensions.
+    -- Claude sees the current file, cursor and visual selection; its proposed edits open as a
+    -- native diff you accept or reject. `claude` launched from this terminal connects on its own;
+    -- an external session connects with `/ide`.
+    'coder/claudecode.nvim',
+    dependencies = { 'folke/snacks.nvim' },
+    opts = {},
+    -- `cmd` creates command stubs so `:ClaudeCode` works on a fresh start before any key is pressed.
+    cmd = {
+      'ClaudeCode',
+      'ClaudeCodeFocus',
+      'ClaudeCodeSelectModel',
+      'ClaudeCodeAdd',
+      'ClaudeCodeSend',
+      'ClaudeCodeTreeAdd',
+      'ClaudeCodeStatus',
+      'ClaudeCodeStart',
+      'ClaudeCodeStop',
+      'ClaudeCodeOpen',
+      'ClaudeCodeClose',
+      'ClaudeCodeDiffAccept',
+      'ClaudeCodeDiffDeny',
+      'ClaudeCodeCloseAllDiffs',
+    },
+    keys = {
+      { '<leader>ac', '<cmd>ClaudeCode<cr>', desc = 'Toggle [C]laude' },
+      { '<leader>af', '<cmd>ClaudeCodeFocus<cr>', desc = '[F]ocus Claude' },
+      { '<leader>ar', '<cmd>ClaudeCode --resume<cr>', desc = '[R]esume Claude' },
+      { '<leader>aC', '<cmd>ClaudeCode --continue<cr>', desc = '[C]ontinue Claude' },
+      { '<leader>am', '<cmd>ClaudeCodeSelectModel<cr>', desc = 'Select Claude [M]odel' },
+      { '<leader>ab', '<cmd>ClaudeCodeAdd %<cr>', desc = 'Add current [B]uffer' },
+      { '<leader>as', '<cmd>ClaudeCodeSend<cr>', mode = 'v', desc = '[S]end selection to Claude' },
+      {
+        '<leader>as',
+        '<cmd>ClaudeCodeTreeAdd<cr>',
+        desc = 'Add file',
+        ft = { 'NvimTree', 'neo-tree', 'oil', 'minifiles', 'netrw', 'snacks_picker_list' },
       },
+      { '<leader>aa', '<cmd>ClaudeCodeDiffAccept<cr>', desc = '[A]ccept diff' },
+      { '<leader>ad', '<cmd>ClaudeCodeDiffDeny<cr>', desc = '[D]eny diff' },
     },
   },
 
@@ -948,7 +1042,7 @@ require('lazy').setup({
   --  Here are some example plugins that I've included in the Kickstart repository.
   --  Uncomment any of the lines below to enable them (you will need to restart nvim).
   --
-  -- require 'kickstart.plugins.debug',
+  require 'kickstart.plugins.debug',
   -- require 'kickstart.plugins.indent_line',
   -- require 'kickstart.plugins.lint',
   -- require 'kickstart.plugins.autopairs',
