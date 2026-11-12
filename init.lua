@@ -612,6 +612,20 @@ require('lazy').setup({
         -- ts_ls = {},
         --
 
+        -- Language servers installed on every machine (Mason package in parentheses).
+        arduino_language_server = {}, -- arduino-language-server
+        clangd = {},
+        cmake = {}, -- cmake-language-server
+        djlsp = {}, -- django-template-lsp
+        jinja_lsp = {}, -- jinja-lsp
+        jsonls = {}, -- json-lsp
+        markdown_oxide = {},
+        matlab_ls = {}, -- matlab-language-server
+        pyright = {},
+        ruff = {},
+        texlab = {},
+        yamlls = {}, -- yaml-language-server
+
         lua_ls = {
           -- cmd = { ... },
           -- filetypes = { ... },
@@ -644,6 +658,11 @@ require('lazy').setup({
       local ensure_installed = vim.tbl_keys(servers or {})
       vim.list_extend(ensure_installed, {
         'stylua', -- Used to format Lua code
+        'black', -- Python formatter
+        'clang-format', -- C/C++ formatter
+        'cpptools', -- C/C++ debug adapter (vscode-cpptools)
+        'gitleaks', -- Secret scanning
+        'jupytext', -- Notebook <-> script conversion
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 
@@ -868,11 +887,39 @@ require('lazy').setup({
   },
   { -- Highlight, edit, and navigate code
     'nvim-treesitter/nvim-treesitter',
+    -- The repo's default branch is now `main` (a rewrite with a different API). This config uses
+    -- the legacy `nvim-treesitter.configs` module, so stay on `master` until we migrate.
+    branch = 'master',
     build = ':TSUpdate',
     main = 'nvim-treesitter.configs', -- Sets main module to use for opts
     -- [[ Configure Treesitter ]] See `:help nvim-treesitter`
     opts = {
-      ensure_installed = { 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' },
+      ensure_installed = {
+        'arduino',
+        'bash',
+        'c',
+        'csv',
+        'diff',
+        'fortran',
+        'fsharp',
+        'git_config',
+        'gitignore',
+        'html',
+        'json',
+        'lua',
+        'luadoc',
+        'make',
+        'markdown',
+        'markdown_inline',
+        'python',
+        'query',
+        'rst',
+        'ssh_config',
+        'toml',
+        'vim',
+        'vimdoc',
+        'yaml',
+      },
       -- Autoinstall languages that are not installed
       auto_install = true,
       highlight = {
