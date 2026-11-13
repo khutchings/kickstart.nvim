@@ -383,7 +383,7 @@ require('lazy').setup({
     lazy = false,
     ---@type snacks.Config
     opts = {
-      picker = { enabled = true },
+      picker = { enabled = true, ui_select = true },
       notifier = { enabled = true },
       indent = { enabled = true },
       words = { enabled = true },
@@ -527,34 +527,9 @@ require('lazy').setup({
             return client:supports_method(method, bufnr)
           end
 
-          -- The following two autocommands are used to highlight references of the
-          -- word under your cursor when your cursor rests there for a little while.
-          --    See `:help CursorHold` for information about when this is executed
-          --
-          -- When you move your cursor, the highlights will be cleared (the second autocommand).
+          -- Highlighting references of the word under the cursor is handled by `Snacks.words`
+          -- (enabled in the snacks.nvim spec above), so no CursorHold autocommands are needed here.
           local client = vim.lsp.get_client_by_id(event.data.client_id)
-          if client and client_supports_method(client, vim.lsp.protocol.Methods.textDocument_documentHighlight, event.buf) then
-            local highlight_augroup = vim.api.nvim_create_augroup('kickstart-lsp-highlight', { clear = false })
-            vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
-              buffer = event.buf,
-              group = highlight_augroup,
-              callback = vim.lsp.buf.document_highlight,
-            })
-
-            vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI' }, {
-              buffer = event.buf,
-              group = highlight_augroup,
-              callback = vim.lsp.buf.clear_references,
-            })
-
-            vim.api.nvim_create_autocmd('LspDetach', {
-              group = vim.api.nvim_create_augroup('kickstart-lsp-detach', { clear = true }),
-              callback = function(event2)
-                vim.lsp.buf.clear_references()
-                vim.api.nvim_clear_autocmds { group = 'kickstart-lsp-highlight', buffer = event2.buf }
-              end,
-            })
-          end
 
           -- The following code creates a keymap to toggle inlay hints in your
           -- code, if the language server you are using supports them
@@ -674,7 +649,6 @@ require('lazy').setup({
       local ensure_installed = vim.tbl_keys(servers or {})
       vim.list_extend(ensure_installed, {
         'stylua', -- Used to format Lua code
-        'black', -- Python formatter
         'clang-format', -- C/C++ formatter
         'cpptools', -- C/C++ debug adapter (vscode-cpptools)
         'gitleaks', -- Secret scanning
@@ -685,19 +659,19 @@ require('lazy').setup({
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 
+      -- Register each server's overrides with Neovim's built-in config layer (`:help vim.lsp.config`).
+      -- nvim-lspconfig supplies the defaults from its `lsp/` directory; what we set here is merged on top.
+      -- mason-lspconfig v2 no longer has a `handlers` option, so this is the only place overrides can go.
+      for server_name, server in pairs(servers) do
+        server.capabilities = vim.tbl_deep_extend('force', {}, capabilities, server.capabilities or {})
+        vim.lsp.config(server_name, server)
+      end
+
       require('mason-lspconfig').setup {
         ensure_installed = {}, -- explicitly set to an empty table (Kickstart populates installs via mason-tool-installer)
-        automatic_installation = false,
-        handlers = {
-          function(server_name)
-            local server = servers[server_name] or {}
-            -- This handles overriding only values explicitly passed
-            -- by the server configuration above. Useful when disabling
-            -- certain features of an LSP (for example, turning off formatting for ts_ls)
-            server.capabilities = vim.tbl_deep_extend('force', {}, capabilities, server.capabilities or {})
-            require('lspconfig')[server_name].setup(server)
-          end,
-        },
+        -- Every installed server is enabled with `vim.lsp.enable()`. stylua is installed as a formatter
+        -- for conform, and nvim-lspconfig happens to ship a server config for it, so keep it out.
+        automatic_enable = { exclude = { 'stylua' } },
       }
     end,
   },
@@ -910,7 +884,7 @@ require('lazy').setup({
       -- the rust implementation via `'prefer_rust_with_warning'`
       --
       -- See :h blink-cmp-config-fuzzy for more information
-      fuzzy = { implementation = 'lua' },
+      fuzzy = { implementation = 'prefer_rust_with_warning' },
 
       -- Shows a signature help window while you type arguments for a function
       signature = { enabled = true },
@@ -981,11 +955,12 @@ require('lazy').setup({
   },
   { -- Highlight, edit, and navigate code
     'nvim-treesitter/nvim-treesitter',
-    -- The repo's default branch is now `main` (a rewrite with a different API). This config uses
-    -- the legacy `nvim-treesitter.configs` module, so stay on `master` until we migrate.
-    branch = 'master',
+    -- `main` is the maintained rewrite; `master` is frozen. `main` only installs parsers and
+    -- queries, so highlighting and indentation are switched on per buffer in the autocommand below.
+    -- Parsers are compiled from source, which needs the `tree-sitter` CLI and a C compiler.
+    branch = 'main',
+    lazy = false,
     build = ':TSUpdate',
-    main = 'nvim-treesitter.configs', -- Sets main module to use for opts
     -- [[ Configure Treesitter ]] See `:help nvim-treesitter`
     opts = {
       ensure_installed = {
@@ -1007,6 +982,7 @@ require('lazy').setup({
         'markdown_inline',
         'python',
         'query',
+        'regex', -- snacks.picker highlights search patterns with it
         'rst',
         'ssh_config',
         'toml',
@@ -1016,15 +992,36 @@ require('lazy').setup({
       },
       -- Autoinstall languages that are not installed
       auto_install = true,
-      highlight = {
-        enable = true,
-        -- Some languages depend on vim's regex highlighting system (such as Ruby) for indent rules.
-        --  If you are experiencing weird indenting issues, add the language to
-        --  the list of additional_vim_regex_highlighting and disabled languages for indent.
-        additional_vim_regex_highlighting = { 'ruby' },
-      },
-      indent = { enable = true, disable = { 'ruby' } },
     },
+    config = function(_, opts)
+      local ts = require 'nvim-treesitter'
+      ts.setup {}
+      ts.install(opts.ensure_installed)
+
+      vim.api.nvim_create_autocmd('FileType', {
+        desc = 'Start treesitter highlighting and indentation',
+        group = vim.api.nvim_create_augroup('kickstart-treesitter', { clear = true }),
+        callback = function(args)
+          local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype)
+          if not lang then
+            return
+          end
+          local function start()
+            if not vim.api.nvim_buf_is_valid(args.buf) then
+              return
+            end
+            if pcall(vim.treesitter.start, args.buf, lang) then
+              vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+            end
+          end
+          if vim.list_contains(ts.get_installed(), lang) then
+            start()
+          elseif opts.auto_install and vim.list_contains(ts.get_available(), lang) then
+            ts.install(lang):await(start)
+          end
+        end,
+      })
+    end,
     -- There are additional nvim-treesitter modules that you can use to interact
     -- with nvim-treesitter. You should go explore a few and see what interests you:
     --
@@ -1053,7 +1050,7 @@ require('lazy').setup({
   --    This is the easiest way to modularize your config.
   --
   --  Uncomment the following line and add your plugins to `lua/custom/plugins/*.lua` to get going.
-  -- { import = 'custom.plugins' },
+  { import = 'custom.plugins' },
   --
   -- For additional information with loading, sourcing and examples see `:help lazy.nvim-🔌-plugin-spec`
   -- Or use telescope!
